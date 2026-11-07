@@ -302,7 +302,7 @@
           "name": "Google Sheets account"
         }
       },
-      "notes": "用row_number做matching key，這是n8n讀取Google Sheets時自動附帶的列號，能確保更新到正確的那一列。把狀態改成「完成」是idempotency的關鍵：下一次排程觸發讀取整張表後，這一列會在「挑出未完成職缺」Filter node被擋掉（狀態≠完成的條件不成立），不會被重複評分、重複扣費。"
+      "notes": "用row_number做matching key，這是n8n讀取Google Sheets時自動附帶的列號，能確保更新到正確的那一列。把狀態改成「完成」，是讓同一筆職缺不會被重複評分的關鍵：下一次排程觸發讀取整張表後，這一列會在「挑出未完成職缺」Filter node被擋掉（狀態≠完成的條件不成立），不會被重複評分、重複扣費。"
     },
     {
       "parameters": {
