@@ -1,0 +1,8 @@
+# 憑證與金鑰一律不進版本控制
+client_secret*
+*OAuth*
+*.env
+.env*
+credentials*.json
+# n8n 原始匯出檔（含真實 Sheet ID 與 email），只放去敏後的版本
+*(*).json

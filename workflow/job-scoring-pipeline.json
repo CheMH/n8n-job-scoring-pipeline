@@ -1,0 +1,655 @@
+{
+  "name": "AI 職缺評分管線 (Job Scoring Pipeline)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "e7836e8c-36a3-456d-a7d7-cc4469be2615",
+      "name": "排程觸發 (每5分鐘)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2336,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "工作表1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "478bae64-f507-4cf2-a3ae-f9baf5d2df30",
+      "name": "讀取待評分職缺列",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -2160,
+        -224
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "此節點現在讀取整張工作表（不篩選），「狀態≠完成」的篩選邏輯已移到後面的「挑出未完成職缺」Filter node 處理。"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "system_prompt_assignment",
+              "name": "system_prompt",
+              "type": "string",
+              "value": "你是一個求職媒合評分系統，由兩個內部人格協作完成評估，最終只輸出單一綜合結果。\n\n【候選人背景】\n（示範用虛構背景；匯入後請換成你自己的真實背景摘要）\n候選人具備約 20 年系統開發與維運資歷，橫跨 3 個技術世代：\n- 2005-2012：製造業 MIS，ERP 導入與主檔遷移\n- 2013-現在：Web 系統維護，主力技術為 PHP、JavaScript、SQL\n\n學歷：專科。求職方向為系統整合工程師，地點台中。\n\n特別注意：PHP/JavaScript 是近 12 年的主力技術，不是 20 年全程都在用；請把「總年資」與「特定技術使用年期」分開判斷。\n【人格一：鼓勵型生涯教練】\n站在求職者角度，找出職缺與候選人背景的契合點、可遷移的能力、成長空間，傾向看見潛力而非僅看表面條件是否100%吻合。\n\n【人格二：嚴格現實派招聘主管】\n站在企業實際用人標準，嚴格核對JD中標記為「必備」「需具備」的硬性條件（證照、最低年資、特定技術棟）是否真的被滿足，並指出薪資落差、職務內容與背景的落差、產業或公司風險等現實面問題，不輕易放水。\n\n【評分流程】\n1. 人格一先給出初步正面評估與契合亮點。\n2. 人格二針對人格一的評估提出質疑與風險點，特別檢查必備條件是否被滿足。\n3. 綜合兩方意見給出最終 match_score（0-10的整數，10代表幾乎完美匹配，7-8代表值得投遞但有條件落差，5-6代表中度匹配需評估風險，4以下代表不建議投遞）。\n4. 重要：若JD中任何一項被標記為必備的硬性條件未被候選人背景滿足，總分不得高於6，避免分數無條件集中在7-9區間。\n\n【輸出格式】\n只能輸出以下JSON，不要有任何前後說明文字，不要使用markdown code fence：\n{\"match_score\": 整數0-10, \"fit_notes\": \"150字以內，綜合兩人格意見後的關鍵理由\", \"highlight_points\": \"若match_score>=8則列出1-3個投遞時可主動強調的亮點，否則為空字串\", \"risk_flags\": \"必備條件未滿足或風險點，以逗號分隔，若無則為空字串\"}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eb3b0ac9-1428-4abb-ad46-cfcc7120a3c5",
+      "name": "設定雙人格評分Prompt與候選人背景",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1776,
+        -448
+      ],
+      "notes": "system_prompt是固定不變的內容，之後在HTTP Request節點會被標記cache_control做prompt caching，所有逐行變動的職缺資訊不要放在這裡，要放在Claude API的messages內。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// JD壓縮：去除制式化福利條款與重複描述，保留含關鍵字的核心需求句\nconst rawJD = $('讀取待評分職缺列').item.json['JD內容'] || \"\";\n\n  console.log($('讀取待評分職缺列').item.json['JD內容']);\n\nconst boilerplatePatterns = [\n  /公司簡介[\\s\\S]*?(?=\\n\\n|$)/,\n  /(優於勞基法|員工旅遊|生日禮金|尾牙|不定期聚餐)[^\\n]*\\n?/g\n];\n\nlet cleaned = rawJD;\nfor (const p of boilerplatePatterns) {\n  cleaned = cleaned.replace(p, '');\n}\n\nconst lines = cleaned.split('\\n').map(l => l.trim()).filter(l => l.length > 0);\nconst keyLines = lines.filter(l => /具備|熟悉|經驗|需求|資格|條件|歡迎|加分|證照|學歷/.test(l));\nconst compressedJd = keyLines.length > 0 ? keyLines.join('\\n') : cleaned.slice(0, 800);\n\nreturn {\n  json: {\n    ...$json,\n    compressed_jd: compressedJd,\n    original_length: rawJD.length,\n    compressed_length: compressedJd.length\n  }\n};"
+      },
+      "id": "ad3615ad-0e2d-4111-85d9-2bb472db45d3",
+      "name": "壓縮JD內容 (Token成本控制)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        -448
+      ],
+      "notes": "這裡用規則式(rule-based)壓縮示範技術。若要在面試展示更進階做法，可以改成先呼叫Claude Haiku做JD摘要(便宜模型做機械性提取)，再把摘要交給Sonnet做評分(貴一點但需要判斷力的模型)，呼應Haiku/Sonnet分工的模型路由邏輯。"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"claude-sonnet-4-6\", max_tokens: 700, system: [ { type: \"text\", text: $json.system_prompt, cache_control: { type: \"ephemeral\" } } ], messages: [ { role: \"user\", content: \"職稱：\" + $('讀取待評分職缺列').item.json['職稱'] + \"\\n公司：\" + $('讀取待評分職缺列').item.json['公司'] + \"\\n薪資：\" + $('讀取待評分職缺列').item.json['薪資'] + \"\\n\\n職缺描述（已壓縮）：\\n\" + $json.compressed_jd } ] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "e7540b05-1f59-4025-a3e6-2242fefbbf0b",
+      "name": "呼叫Claude API評分",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1344,
+        -224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "Credential類型用Header Auth，Header名稱設為x-api-key，值為你的Anthropic API Key。system block標記cache_control後，因為候選人背景與雙人格prompt每次都完全相同，這部分的token會走cache讀取價(約為原價10%)，只有messages內逐行不同的職缺資訊是全價計算。"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let parsed;\ntry {\n  const responseText = $json.content[0].text;\n  const cleanedText = responseText.replace(/```json\\n?|```/g, '').trim();\n  parsed = JSON.parse(cleanedText);\n} catch (e) {\n  parsed = {\n    match_score: '',\n    fit_notes: '解析失敗，需人工檢查 (' + e.message + ')',\n    highlight_points: '',\n    risk_flags: ''\n  };\n}\n\nreturn {\n  json: {\n    match_score: parsed.match_score,\n    fit_notes: parsed.fit_notes,\n    highlight_points: parsed.highlight_points,\n    risk_flags: parsed.risk_flags\n  }\n};"
+      },
+      "id": "d89d94e7-ea2c-4417-bc08-04c2cdbbe21b",
+      "name": "解析評分結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        -80
+      ],
+      "notes": "Claude偶爾仍可能在JSON外加上多餘文字或code fence，這個節點做防呆解析，解析失敗時不會中斷流程，而是寫入'解析失敗'狀態讓人工複查，避免整條pipeline因單一筆資料而卡死。"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "工作表1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Match Score": "={{ $json.match_score }}",
+            "風險標記": "={{ $json.risk_flags }}",
+            "Fit Note": "={{ $json.fit_notes }}",
+            "row_number": "={{ $('讀取待評分職缺列').item.json.row_number }}",
+            "狀態": "完成",
+            "評分時間": "={{ $now }}",
+            "強調重點": "={{ $json.highlight_points }}"
+          },
+          "matchingColumns": [
+            "row_number"
+          ],
+          "schema": [
+            {
+              "id": "職稱",
+              "displayName": "職稱",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "公司",
+              "displayName": "公司",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "薪資",
+              "displayName": "薪資",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "JD內容",
+              "displayName": "JD內容",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "狀態",
+              "displayName": "狀態",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Match Score",
+              "displayName": "Match Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Fit Note",
+              "displayName": "Fit Note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "強調重點",
+              "displayName": "強調重點",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "風險標記",
+              "displayName": "風險標記",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "評分時間",
+              "displayName": "評分時間",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "f529e343-1e6b-48c6-9ff9-22406c71cee1",
+      "name": "寫回評分結果",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -960,
+        64
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "用row_number做matching key，這是n8n讀取Google Sheets時自動附帶的列號，能確保更新到正確的那一列。把狀態改成「完成」是idempotency的關鍵：下一次排程觸發讀取整張表後，這一列會在「挑出未完成職缺」Filter node被擋掉（狀態≠完成的條件不成立），不會被重複評分、重複扣費。"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('解析評分結果').item.json.match_score }}",
+              "rightValue": 8,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              },
+              "id": "5cac2329-694a-4c2b-9c3e-e281a81689eb"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "648956be-71cc-4887-8ef5-09f9e4d70d66",
+      "name": "門檻判斷 (Match Score >= 8)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -784,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "your_email@example.com",
+        "subject": "=高分職缺通知: {{ $('讀取待評分職缺列').item.json['公司'] }} - {{ $('讀取待評分職缺列').item.json['職稱'] }} (Score: {{ $('寫回評分結果').item.json['Match Score'] }})",
+        "message": "=職稱：{{ $('讀取待評分職缺列').item.json['職稱'] }}\n公司：{{ $('讀取待評分職缺列').item.json['公司'] }}\n薪資：{{ $('讀取待評分職缺列').item.json['薪資'] }}\nMatch Score：{{ $json['Match Score'] }}\n\n強調重點：\n{{ $json['強調重點'] }}\n\n評分理由：\n{{ $json['Fit Note'] }}\n\n",
+        "options": {}
+      },
+      "id": "25f0903f-6a8a-4870-9d06-799f50f3e2b4",
+      "name": "高分職缺通知",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -624,
+        -224
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      },
+      "notes": "通知管道用Gmail示範，因為你已經在Google生態系內。若想要更即時，可以把這個節點換成Slack或LINE Notify的node，邏輯完全不變。"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fb74a835-470c-4afe-900d-26633d1e756f",
+              "leftValue": "={{ $json['狀態'] }}",
+              "rightValue": "完成",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        -1984,
+        -416
+      ],
+      "id": "c0aba56e-7cf8-4abb-9d51-49e4395d908c",
+      "name": "挑出未完成職缺"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "工作表2",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "時間": "={{ $now }}",
+            "職稱": "={{ $('讀取待評分職缺列').item.json['職稱'] }}",
+            "公司": "={{ $('讀取待評分職缺列').item.json['公司'] }}",
+            "model": "={{ $json.model }}",
+            "input_tokens": "={{ $json.usage.input_tokens }}",
+            "output_tokens": "={{ $json.usage.output_tokens }}",
+            "cache_creation_input_tokens": "={{ $json.usage.cache_creation_input_tokens }}",
+            "cache_read_input_tokens": "={{ $json.usage.cache_read_input_tokens }}",
+            "total_tokens": "={{ $json.usage.input_tokens + $json.usage.output_tokens + ($json.usage.cache_creation_input_tokens ?? 0) + ($json.usage.cache_read_input_tokens ?? 0) }}",
+            "參考列號": "={{ $('讀取待評分職缺列').item.json.row_number }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "時間",
+              "displayName": "時間",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "職稱",
+              "displayName": "職稱",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "公司",
+              "displayName": "公司",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "model",
+              "displayName": "model",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "input_tokens",
+              "displayName": "input_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "output_tokens",
+              "displayName": "output_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cache_creation_input_tokens",
+              "displayName": "cache_creation_input_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cache_read_input_tokens",
+              "displayName": "cache_read_input_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_tokens",
+              "displayName": "total_tokens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "參考列號",
+              "displayName": "參考列號",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1120,
+        -352
+      ],
+      "id": "a42d3d8f-a8ba-44c3-a19a-a17ebdd391a5",
+      "name": "記錄Token用量明細",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "排程觸發 (每5分鐘)": {
+      "main": [
+        [
+          {
+            "node": "讀取待評分職缺列",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "讀取待評分職缺列": {
+      "main": [
+        [
+          {
+            "node": "挑出未完成職缺",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "設定雙人格評分Prompt與候選人背景": {
+      "main": [
+        [
+          {
+            "node": "壓縮JD內容 (Token成本控制)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "壓縮JD內容 (Token成本控制)": {
+      "main": [
+        [
+          {
+            "node": "呼叫Claude API評分",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "呼叫Claude API評分": {
+      "main": [
+        [
+          {
+            "node": "解析評分結果",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "記錄Token用量明細",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析評分結果": {
+      "main": [
+        [
+          {
+            "node": "寫回評分結果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "寫回評分結果": {
+      "main": [
+        [
+          {
+            "node": "門檻判斷 (Match Score >= 8)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "門檻判斷 (Match Score >= 8)": {
+      "main": [
+        [
+          {
+            "node": "高分職缺通知",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "挑出未完成職缺": {
+      "main": [
+        [
+          {
+            "node": "設定雙人格評分Prompt與候選人背景",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
